@@ -8,7 +8,7 @@ import (
 	"image"
 	"io"
 
-	"github.com/gen2brain/x264-go/x264c"
+	"github.com/piepacker/x264-go/x264c"
 )
 
 // Logging constants.
@@ -36,6 +36,13 @@ type Options struct {
 	Profile string
 	// Log level.
 	LogLevel int32
+	// CSP
+	Csp int32
+	// Pts
+	Pts int64
+	// Nals
+	Nals []*x264c.Nal
+	Param *x264c.Param
 }
 
 // Encoder type.
@@ -55,53 +62,85 @@ type Encoder struct {
 	picIn x264c.Picture
 }
 
-// NewEncoder returns new x264 encoder.
-func NewEncoder(w io.Writer, opts *Options) (e *Encoder, err error) {
-	e = &Encoder{}
+func DefaultOptions(width, height, fps int) (*Options, error) {
+	opts := &Options{
+		Width:     width,
+		Height:    height,
+		FrameRate: fps,
+		Tune:      "zerolatency",
+		Preset:    "veryfast",
+		Profile:   "baseline",
+		LogLevel:  LogInfo,
+		Csp: x264c.CspI420,
+		Pts: 0,
+		Nals: make([]*x264c.Nal, 3),
+	}
+	if err := DefaultParams(opts); err != nil {
+		return nil, err
+	}
+	return opts, nil
+}
 
-	e.w = w
-	e.pts = 0
-	e.opts = opts
-
-	e.csp = x264c.CspI420
-
-	e.nals = make([]*x264c.Nal, 3)
-	e.img = NewYCbCr(image.Rect(0, 0, e.opts.Width, e.opts.Height))
-
+// DefaultParams sets up the Param field of an Option struct with the default values expected by the x264/gen2brain.
+// DefaultParams is a good starting point, knowing that Params can always be updated later on.
+// NOTE: DefaultParams expected that the top level fields of the Options struct (except Param) to be already filled in.
+func DefaultParams(opts *Options) error {
 	param := x264c.Param{}
-
-	if e.opts.Preset != "" && e.opts.Profile != "" {
-		ret := x264c.ParamDefaultPreset(&param, e.opts.Preset, e.opts.Tune)
+	if opts.Preset != "" && opts.Profile != "" {
+		ret := x264c.ParamDefaultPreset(&param, opts.Preset, opts.Tune)
 		if ret < 0 {
-			err = fmt.Errorf("x264: invalid preset/tune name")
-			return
+			return fmt.Errorf("x264: invalid preset/tune name")
 		}
 	} else {
 		x264c.ParamDefault(&param)
 	}
 
-	param.IWidth = int32(e.opts.Width)
-	param.IHeight = int32(e.opts.Height)
+	param.IWidth = int32(opts.Width)
+	param.IHeight = int32(opts.Height)
 
-	param.ICsp = e.csp
+	param.ICsp = x264c.CspI420
 	param.BVfrInput = 0
 	param.BRepeatHeaders = 1
 	param.BAnnexb = 1
 
-	param.ILogLevel = e.opts.LogLevel
+	param.ILogLevel = opts.LogLevel
 
-	if e.opts.FrameRate > 0 {
-		param.IFpsNum = uint32(e.opts.FrameRate)
+	if opts.FrameRate > 0 {
+		param.IFpsNum = uint32(opts.FrameRate)
 		param.IFpsDen = 1
 
-		param.IKeyintMax = int32(e.opts.FrameRate)
+		param.IKeyintMax = int32(opts.FrameRate)
 		param.BIntraRefresh = 1
 	}
 
-	if e.opts.Profile != "" {
-		ret := x264c.ParamApplyProfile(&param, e.opts.Profile)
+	if opts.Profile != "" {
+		ret := x264c.ParamApplyProfile(&param, opts.Profile)
 		if ret < 0 {
-			err = fmt.Errorf("x264: invalid profile name")
+			return fmt.Errorf("x264: invalid profile name")
+		}
+	}
+	opts.Param = &param
+	return nil
+}
+
+// NewEncoder returns new x264 encoder.
+func NewEncoder(w io.Writer, opts *Options) (e *Encoder, err error) {
+	e = &Encoder{}
+
+	e.w = w
+	e.pts = opts.Pts
+	e.opts = opts
+
+	e.csp = opts.Csp
+
+	e.nals = opts.Nals
+	e.img = NewYCbCr(image.Rect(0, 0, e.opts.Width, e.opts.Height))
+
+	if opts.Param != nil {
+		// if param is specified (not nil) then param is used.
+	} else {
+		err = DefaultParams(opts)
+		if err != nil {
 			return
 		}
 	}
@@ -121,7 +160,7 @@ func NewEncoder(w io.Writer, opts *Options) (e *Encoder, err error) {
 		}
 	}()
 
-	e.e = x264c.EncoderOpen(&param)
+	e.e = x264c.EncoderOpen(opts.Param)
 	if e.e == nil {
 		err = fmt.Errorf("x264: cannot open the encoder")
 		return
